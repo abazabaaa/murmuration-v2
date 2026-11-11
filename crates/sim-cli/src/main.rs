@@ -1,5 +1,8 @@
+mod stage2;
+
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use sim_core::coupled::{CoupledConfig, CoupledFlock};
 use sim_core::eval::{
     compute_polarization, compute_spatial_aspect_ratios, compute_spatial_correlations,
     compute_topological_anisotropy_gamma, wasserstein_1d, AspectRatioSummary,
@@ -34,6 +37,7 @@ struct ScenarioFile {
 enum ScenarioKind {
     ConstantSpeed { config: ConstantSpeedConfig },
     MarginalSpp { config: MarginalSppConfig },
+    Coupled { config: CoupledConfig },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -120,7 +124,7 @@ struct FullStage1Report {
     overall_stage1_passed: bool,
 }
 
-fn generate_stress_cloud(regime_idx: usize, n: usize, seed: u64) -> (Vec<Vec3>, Vec<Vec3>) {
+pub(crate) fn generate_stress_cloud(regime_idx: usize, n: usize, seed: u64) -> (Vec<Vec3>, Vec<Vec3>) {
     let mut pos = Vec::with_capacity(n);
     let mut u = Vec::with_capacity(n);
     for i in 0..n {
@@ -309,6 +313,7 @@ fn run_gate2_convergence() -> Gate2ConvergenceReport {
                 r0_m: 1.2,
                 k_rep: 1.0,
                 n_rep: 1,
+                vertical_coh_gain: 1.0,
             },
             turn_pulse: None,
         };
@@ -345,6 +350,7 @@ fn run_gate2_convergence() -> Gate2ConvergenceReport {
                 r0_m: 1.2,
                 k_rep: 1.0,
                 n_rep: 1,
+                vertical_coh_gain: 1.0,
             },
         };
         let mut f = MarginalSppFlock::new(init_pos.clone(), init_vel.clone());
@@ -444,6 +450,7 @@ fn run_gate2_convergence() -> Gate2ConvergenceReport {
                         r0_m: 1.0,
                         k_rep: 1.2,
                         n_rep: 1,
+                        vertical_coh_gain: 1.0,
                     },
                 };
                 let mut f = MarginalSppFlock::new(p0, v0_vec);
@@ -677,6 +684,7 @@ fn run_gate3_reference_physics() -> Gate3ReferencePhysicsReport {
                             r0_m: 1.0,
                             k_rep: 1.6,
                             n_rep: 1,
+                            vertical_coh_gain: 1.0,
                         },
                     };
                     let mut flock = MarginalSppFlock::new(p0, v0_init);
@@ -780,6 +788,7 @@ fn run_gate3_reference_physics() -> Gate3ReferencePhysicsReport {
             r0_m: 1.1,
             k_rep: 1.4,
             n_rep: 1,
+            vertical_coh_gain: 1.0,
         },
     };
     let mut calm_flock = MarginalSppFlock::new(p_calm, v_calm);
@@ -941,6 +950,49 @@ fn run_scenario_file(path: &str) {
             });
             println!("{}", serde_json::to_string_pretty(&out).unwrap());
         }
+        ScenarioKind::Coupled { config } => {
+            let dt = config.dt;
+            let burn_steps = ((scen.burn_in_s / dt).round()) as usize;
+            let meas_steps = (((scen.duration_s - scen.burn_in_s).max(dt) / dt).round()) as usize;
+            let (p0, u0) = generate_stress_cloud(0, scen.n_birds, config.master_seed);
+            let v0: Vec<Vec3> = u0.into_iter().map(|u| u * 12.0).collect();
+            let mut flock = CoupledFlock::from_cartesian(p0, v0);
+            for _ in 0..burn_steps {
+                flock.step(&config, None);
+            }
+            let t0 = (flock.tick as f32) * dt;
+            let mut diff = InternalDiffusionTracker::initialize(&flock.pos, 7, t0);
+            let mut acc = SpeedAccumulator::new(scen.n_birds);
+            let mut phi_sum = 0.0f32;
+            let mut corr_last =
+                compute_spatial_correlations(&flock.pos, &flock.velocities(), 16);
+            let mut snaps = 0usize;
+            for k in 0..meas_steps {
+                flock.step(&config, None);
+                let t_now = (flock.tick as f32) * dt;
+                if k % 5 == 0 {
+                    diff.record_40hz(&flock.pos, t_now);
+                }
+                if k % 20 == 0 {
+                    diff.record_qm_10hz(&flock.pos);
+                    let vel = flock.velocities();
+                    acc.record(&vel);
+                    phi_sum += compute_polarization(&vel);
+                    corr_last = compute_spatial_correlations(&flock.pos, &vel, 16);
+                    snaps += 1;
+                }
+            }
+            let out = serde_json::json!({
+                "scenario": scen.name,
+                "mean_phi": phi_sum / (snaps.max(1) as f32),
+                "aspect_ratio": compute_spatial_aspect_ratios(&flock.pos),
+                "correlations": corr_last,
+                "diffusion": diff.summarize(),
+                "speed": acc.summarize(flock.speed_clamp_events),
+                "v_eps_floor_events": flock.v_eps_floor_events,
+            });
+            println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        }
     }
 }
 
@@ -989,6 +1041,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        "verify-stage2" => {
+            let full = stage2::run_verify_stage2();
+            println!("{}", serde_json::to_string_pretty(&full).unwrap());
+            if !full.overall_stage2_passed {
+                std::process::exit(1);
+            }
+        }
         "run" => {
             let path = args
                 .get(2)
@@ -997,7 +1056,7 @@ fn main() {
         }
         other => {
             eprintln!(
-                "Unknown subcommand '{other}'. Expected: verify-stage1 | gate1-oracle | gate2-convergence | gate3-physics | run <scenario.toml>"
+                "Unknown subcommand '{other}'. Expected: verify-stage1 | verify-stage2 | gate1-oracle | gate2-convergence | gate3-physics | run <scenario.toml>"
             );
             std::process::exit(2);
         }
