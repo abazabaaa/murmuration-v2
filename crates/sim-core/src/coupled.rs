@@ -2,7 +2,9 @@ use crate::math::{compute_mode_k_bank_angle, rodrigues_rotate, Vec3};
 use crate::models::{
     compute_positional_force, ExternalTurnPulse, PositionalInteractionConfig, SpeedControlLaw,
 };
-use crate::neighbour::{GraphSymmetry, LbvhIndex, NeighbourEntry, NeighbourRule, WeightedGraph};
+use crate::neighbour::{
+    FlatNeighbourTable, GraphSymmetry, LbvhIndex, NeighbourEntry, NeighbourRule, WeightedGraph,
+};
 use crate::rng::{keyed_rng, normal_vec3, STREAM_WIENER};
 use serde::{Deserialize, Serialize};
 
@@ -103,16 +105,14 @@ impl CoupledFlock {
         let t_now = (self.tick as f32) * dt;
         let vel_curr = self.velocities();
 
-        let owned_neighbours;
-        let neighbours: &[Vec<NeighbourEntry>] = match fixed_neighbours {
-            Some(nb) => nb,
+        let flat_nb: FlatNeighbourTable = match fixed_neighbours {
+            Some(nb) => FlatNeighbourTable::from_vecs(nb),
             None => {
                 let lbvh = LbvhIndex::build(&self.pos);
-                owned_neighbours = lbvh.query_all(&self.pos, &self.heading, cfg.neighbour_rule);
-                &owned_neighbours
+                lbvh.query_all_flat(&self.pos, &self.heading, cfg.neighbour_rule)
             }
         };
-        let graph = WeightedGraph::from_neighbours(neighbours, cfg.graph_symmetry);
+        let graph = WeightedGraph::from_flat_neighbours(&flat_nb, cfg.graph_symmetry);
 
         let sqrt_2dv_dt = libm::sqrtf(2.0 * cfg.d_v * dt);
 
@@ -146,7 +146,7 @@ impl CoupledFlock {
                 w_row_sum += w;
                 align_v_dot_u += w * vj.dot(ui);
             }
-            let mut f_pos_ext = compute_positional_force(i, &self.pos, &neighbours[i], &cfg.positional);
+            let mut f_pos_ext = compute_positional_force(i, &self.pos, flat_nb.row(i), &cfg.positional);
             if let Some(pulse) = cfg.turn_pulse {
                 if i < pulse.initiator_ids && t_now >= pulse.start_time_s && t_now <= pulse.end_time_s {
                     f_pos_ext += pulse.accel_vec;

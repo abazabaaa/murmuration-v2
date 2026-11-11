@@ -1,0 +1,4 @@
+[target.wasm32-unknown-unknown]
+# Single-threaded WebAssembly baseline 128-bit SIMD (+simd128) without +atomics or SharedArrayBuffer,
+# avoiding COOP/COEP header lock-in on static hosts (§4.2.2).
+rustflags = ["-C", "target-feature=+simd128"]

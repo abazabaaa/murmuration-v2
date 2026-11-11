@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/sim-core",
     "crates/sim-cli",
+    "crates/sim-wasm",
 ]
 
 [workspace.package]

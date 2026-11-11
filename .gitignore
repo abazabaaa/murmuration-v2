@@ -1,5 +1,8 @@
 /target
 /node_modules
+/web/node_modules
+/web/dist
+/web/public/wasm/*.wasm
 /out
 .DS_Store
 *.profraw

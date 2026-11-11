@@ -208,6 +208,44 @@ fn query_octant_single_bird(
     out
 }
 
+/// Contiguous zero-per-bird-allocation neighbour table (`entries[offsets[i]..offsets[i+1]]`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FlatNeighbourTable {
+    pub offsets: Vec<u32>,
+    pub entries: Vec<NeighbourEntry>,
+}
+
+impl FlatNeighbourTable {
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub fn row(&self, i: usize) -> &[NeighbourEntry] {
+        let s = self.offsets[i] as usize;
+        let e = self.offsets[i + 1] as usize;
+        &self.entries[s..e]
+    }
+
+    pub fn from_vecs(rows: &[Vec<NeighbourEntry>]) -> Self {
+        let mut offsets = Vec::with_capacity(rows.len() + 1);
+        offsets.push(0);
+        let total: usize = rows.iter().map(|r| r.len()).sum();
+        let mut entries = Vec::with_capacity(total);
+        for r in rows {
+            entries.extend_from_slice(r);
+            offsets.push(entries.len() as u32);
+        }
+        Self { offsets, entries }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct BvhNode {
     aabb_min: Vec3,
@@ -225,9 +263,10 @@ pub struct LbvhIndex {
     nodes: Vec<BvhNode>,
     ordered_ids: Vec<u32>,
     ordered_pos: Vec<Vec3>,
+    bird_leaf: Vec<u32>,
 }
 
-const LEAF_CAPACITY: usize = 8;
+const LEAF_CAPACITY: usize = 32;
 
 impl LbvhIndex {
     pub fn build(positions: &[Vec3]) -> Self {
@@ -237,6 +276,7 @@ impl LbvhIndex {
                 nodes: Vec::new(),
                 ordered_ids: Vec::new(),
                 ordered_pos: Vec::new(),
+                bird_leaf: Vec::new(),
             };
         }
 
@@ -248,7 +288,8 @@ impl LbvhIndex {
             .collect();
 
         let mut nodes = Vec::with_capacity(2 * (n / LEAF_CAPACITY + 2));
-        Self::build_kd_bvh(&mut items, 0, n, &mut nodes);
+        let mut bird_leaf = vec![0u32; n];
+        Self::build_kd_bvh(&mut items, 0, n, &mut nodes, &mut bird_leaf);
 
         let mut ordered_ids = Vec::with_capacity(n);
         let mut ordered_pos = Vec::with_capacity(n);
@@ -261,6 +302,7 @@ impl LbvhIndex {
             nodes,
             ordered_ids,
             ordered_pos,
+            bird_leaf,
         }
     }
 
@@ -269,18 +311,28 @@ impl LbvhIndex {
         start: usize,
         end: usize,
         nodes: &mut Vec<BvhNode>,
+        bird_leaf: &mut [u32],
     ) -> u32 {
         let idx = nodes.len() as u32;
         let slice = &mut items[start..end];
         let mut aabb_min = slice[0].1;
         let mut aabb_max = slice[0].1;
-        for &(_, p) in &slice[1..] {
+        let mut mean = Vec3::ZERO;
+        let mut m2 = Vec3::ZERO;
+        for (step_n, &(_, p)) in slice.iter().enumerate() {
             aabb_min.x = aabb_min.x.min(p.x);
             aabb_min.y = aabb_min.y.min(p.y);
             aabb_min.z = aabb_min.z.min(p.z);
             aabb_max.x = aabb_max.x.max(p.x);
             aabb_max.y = aabb_max.y.max(p.y);
             aabb_max.z = aabb_max.z.max(p.z);
+            let inv = 1.0 / ((step_n + 1) as f32);
+            let d = p - mean;
+            mean += d * inv;
+            let d2 = p - mean;
+            m2.x += d.x * d2.x;
+            m2.y += d.y * d2.y;
+            m2.z += d.z * d2.z;
         }
 
         let count = end - start;
@@ -293,13 +345,12 @@ impl LbvhIndex {
         });
 
         if count > LEAF_CAPACITY {
-            let span = aabb_max - aabb_min;
-            let axis = if span.x >= span.y && span.x >= span.z {
-                0
-            } else if span.y >= span.z {
-                1
+            let axis = if m2.x >= m2.y && m2.x >= m2.z {
+                0usize
+            } else if m2.y >= m2.z {
+                1usize
             } else {
-                2
+                2usize
             };
             let mid_local = count / 2;
             slice.select_nth_unstable_by(mid_local, |a, b| {
@@ -316,11 +367,15 @@ impl LbvhIndex {
                 canonical_f32_cmp(ca, cb).then_with(|| a.0.cmp(&b.0))
             });
             let mid = start + mid_local;
-            let left = Self::build_kd_bvh(items, start, mid, nodes);
-            let right = Self::build_kd_bvh(items, mid, end, nodes);
+            let left = Self::build_kd_bvh(items, start, mid, nodes, bird_leaf);
+            let right = Self::build_kd_bvh(items, mid, end, nodes, bird_leaf);
             nodes[idx as usize].left_or_start = left;
             nodes[idx as usize].right_child = right;
             nodes[idx as usize].count = 0;
+        } else {
+            for &(bird_id, _) in &items[start..end] {
+                bird_leaf[bird_id as usize] = idx;
+            }
         }
         idx
     }
@@ -331,13 +386,95 @@ impl LbvhIndex {
         headings: &[Vec3],
         rule: NeighbourRule,
     ) -> Vec<Vec<NeighbourEntry>> {
+        let flat = self.query_all_flat(positions, headings, rule);
         let n = positions.len();
-        assert_eq!(n, headings.len());
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
-            out.push(self.query_single(i, positions, headings[i], rule));
+            out.push(flat.row(i).to_vec());
         }
         out
+    }
+
+    /// Zero-per-bird-allocation batch query into a single contiguous `FlatNeighbourTable`.
+    /// Traverses queries in spatial BVH order (`ordered_ids`) for L1 cache locality when `k <= 16`.
+    pub fn query_all_flat(
+        &self,
+        positions: &[Vec3],
+        headings: &[Vec3],
+        rule: NeighbourRule,
+    ) -> FlatNeighbourTable {
+        let n = positions.len();
+        assert_eq!(n, headings.len());
+        if n == 0 {
+            return FlatNeighbourTable {
+                offsets: vec![0],
+                entries: Vec::new(),
+            };
+        }
+
+        if let NeighbourRule::ExactTopoK { k, blind_cos } = rule {
+            if k > 0 && k <= 16 {
+                return self.query_all_knn_spatial_order(positions, headings, k, blind_cos, f32::INFINITY);
+            }
+        }
+        if let NeighbourRule::BoundedTopoK { k, blind_cos, r_perc } = rule {
+            if k > 0 && k <= 16 {
+                return self.query_all_knn_spatial_order(positions, headings, k, blind_cos, r_perc * r_perc);
+            }
+        }
+
+        let mut offsets = Vec::with_capacity(n + 1);
+        offsets.push(0);
+        let mut entries = Vec::with_capacity(n * 8);
+        for i in 0..n {
+            self.append_query_single(i, positions, headings[i], rule, &mut entries);
+            offsets.push(entries.len() as u32);
+        }
+        FlatNeighbourTable { offsets, entries }
+    }
+
+    fn query_all_knn_spatial_order(
+        &self,
+        positions: &[Vec3],
+        headings: &[Vec3],
+        k: usize,
+        blind_cos: f32,
+        max_dist_sq_cutoff: f32,
+    ) -> FlatNeighbourTable {
+        let n = positions.len();
+        let dummy = NeighbourEntry {
+            id: u32::MAX,
+            dist_sq: f32::INFINITY,
+        };
+        let mut slots = vec![dummy; n * k];
+        let mut counts = vec![0u8; n];
+
+        // Query in Morton/KD leaf order so adjacent birds share L1-cached BVH nodes!
+        for &bird_id in &self.ordered_ids {
+            let i = bird_id as usize;
+            let dst = &mut slots[i * k..(i + 1) * k];
+            let c = self.fill_knn_stack16(
+                bird_id,
+                positions[i],
+                headings[i],
+                k,
+                blind_cos,
+                max_dist_sq_cutoff,
+                dst,
+            );
+            counts[i] = c as u8;
+        }
+
+        let mut offsets = Vec::with_capacity(n + 1);
+        offsets.push(0);
+        let total: usize = counts.iter().map(|&c| c as usize).sum();
+        let mut entries = Vec::with_capacity(total);
+        for i in 0..n {
+            let c = counts[i] as usize;
+            entries.extend_from_slice(&slots[i * k..i * k + c]);
+            offsets.push(entries.len() as u32);
+        }
+        FlatNeighbourTable { offsets, entries }
     }
 
     pub fn query_single(
@@ -347,29 +484,61 @@ impl LbvhIndex {
         ui: Vec3,
         rule: NeighbourRule,
     ) -> Vec<NeighbourEntry> {
+        let mut out = Vec::new();
+        self.append_query_single(i, positions, ui, rule, &mut out);
+        out
+    }
+
+    #[inline]
+    fn append_query_single(
+        &self,
+        i: usize,
+        positions: &[Vec3],
+        ui: Vec3,
+        rule: NeighbourRule,
+        out: &mut Vec<NeighbourEntry>,
+    ) {
         if self.nodes.is_empty() {
-            return Vec::new();
+            return;
         }
         match rule {
             NeighbourRule::ExactTopoK { k, blind_cos } => {
-                self.query_knn(i as u32, positions[i], ui, k, blind_cos, f32::INFINITY)
+                self.append_knn(i as u32, positions[i], ui, k, blind_cos, f32::INFINITY, out);
             }
             NeighbourRule::BoundedTopoK {
                 k,
                 blind_cos,
                 r_perc,
-            } => self.query_knn(i as u32, positions[i], ui, k, blind_cos, r_perc * r_perc),
+            } => {
+                self.append_knn(
+                    i as u32,
+                    positions[i],
+                    ui,
+                    k,
+                    blind_cos,
+                    r_perc * r_perc,
+                    out,
+                );
+            }
             NeighbourRule::OctantTopoK { k_max, blind_cos } => {
-                query_octant_single_bird(i, positions, ui, k_max, blind_cos)
+                out.extend_from_slice(&query_octant_single_bird(i, positions, ui, k_max, blind_cos));
             }
             NeighbourRule::MetricRadius {
                 r_metric,
                 blind_cos,
-            } => self.query_metric(i as u32, positions[i], ui, blind_cos, r_metric * r_metric),
+            } => {
+                out.extend_from_slice(&self.query_metric(
+                    i as u32,
+                    positions[i],
+                    ui,
+                    blind_cos,
+                    r_metric * r_metric,
+                ));
+            }
         }
     }
 
-    fn query_knn(
+    fn append_knn(
         &self,
         self_id: u32,
         xi: Vec3,
@@ -377,28 +546,42 @@ impl LbvhIndex {
         k: usize,
         blind_cos: f32,
         max_dist_sq_cutoff: f32,
-    ) -> Vec<NeighbourEntry> {
+        out: &mut Vec<NeighbourEntry>,
+    ) {
         if k == 0 || self.nodes.is_empty() {
-            return Vec::new();
+            return;
         }
-
+        if k <= 16 {
+            self.append_knn_stack16(self_id, xi, ui, k, blind_cos, max_dist_sq_cutoff, out);
+            return;
+        }
         let mut best: Vec<NeighbourEntry> = Vec::with_capacity(k + 1);
-        let mut stack = [0u32; 64];
+        let root_d2 = aabb_min_dist_sq(xi, self.nodes[0].aabb_min, self.nodes[0].aabb_max);
+        if root_d2 > max_dist_sq_cutoff {
+            return;
+        }
+        let mut stack = [(0u32, root_d2); 64];
         let mut sp = 1usize;
-        stack[0] = 0;
 
         while sp > 0 {
             sp -= 1;
-            let node = self.nodes[stack[sp] as usize];
-            let d_min_sq = aabb_min_dist_sq(xi, node.aabb_min, node.aabb_max);
-            if d_min_sq > max_dist_sq_cutoff {
-                continue;
-            }
-            // Strict `>` guarantees exact distance ties with lower `bird_id` are never pruned.
+            let (node_idx, d_min_sq) = stack[sp];
             if best.len() == k && d_min_sq > best[k - 1].dist_sq {
                 continue;
             }
-            if blind_cos > -1.0 && d_min_sq > 0.0 && aabb_strictly_in_blind_cone(xi, ui, blind_cos, node.aabb_min, node.aabb_max, d_min_sq) {
+            let node = self.nodes[node_idx as usize];
+            if (node.count == 0 || best.len() < k)
+                && blind_cos > -1.0
+                && d_min_sq > 0.0
+                && aabb_strictly_in_blind_cone(
+                    xi,
+                    ui,
+                    blind_cos,
+                    node.aabb_min,
+                    node.aabb_max,
+                    d_min_sq,
+                )
+            {
                 continue;
             }
 
@@ -435,23 +618,236 @@ impl LbvhIndex {
                     }
                 }
             } else {
+                let cutoff = if best.len() == k {
+                    best[k - 1].dist_sq.min(max_dist_sq_cutoff)
+                } else {
+                    max_dist_sq_cutoff
+                };
                 let left = node.left_or_start;
                 let right = node.right_child;
-                let dl = aabb_min_dist_sq(xi, self.nodes[left as usize].aabb_min, self.nodes[left as usize].aabb_max);
-                let dr = aabb_min_dist_sq(xi, self.nodes[right as usize].aabb_min, self.nodes[right as usize].aabb_max);
-                // Push farther child first so the closer child is popped and tightens `best` first.
-                if dl <= dr {
-                    stack[sp] = right;
-                    stack[sp + 1] = left;
-                } else {
-                    stack[sp] = left;
-                    stack[sp + 1] = right;
+                let nl = &self.nodes[left as usize];
+                let nr = &self.nodes[right as usize];
+                let dl = aabb_min_dist_sq(xi, nl.aabb_min, nl.aabb_max);
+                let dr = aabb_min_dist_sq(xi, nr.aabb_min, nr.aabb_max);
+                let l_ok = dl <= cutoff;
+                let r_ok = dr <= cutoff;
+                if l_ok && r_ok {
+                    if dl <= dr {
+                        stack[sp] = (right, dr);
+                        stack[sp + 1] = (left, dl);
+                    } else {
+                        stack[sp] = (left, dl);
+                        stack[sp + 1] = (right, dr);
+                    }
+                    sp += 2;
+                } else if l_ok {
+                    stack[sp] = (left, dl);
+                    sp += 1;
+                } else if r_ok {
+                    stack[sp] = (right, dr);
+                    sp += 1;
                 }
-                sp += 2;
+            }
+        }
+        out.extend_from_slice(&best);
+    }
+
+    #[inline]
+    fn append_knn_stack16(
+        &self,
+        self_id: u32,
+        xi: Vec3,
+        ui: Vec3,
+        k: usize,
+        blind_cos: f32,
+        max_dist_sq_cutoff: f32,
+        out: &mut Vec<NeighbourEntry>,
+    ) {
+        let mut best = [NeighbourEntry {
+            id: u32::MAX,
+            dist_sq: f32::INFINITY,
+        }; 16];
+        let best_len = self.fill_knn_stack16(
+            self_id,
+            xi,
+            ui,
+            k,
+            blind_cos,
+            max_dist_sq_cutoff,
+            &mut best[..k],
+        );
+        out.extend_from_slice(&best[..best_len]);
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    fn fill_knn_stack16(
+        &self,
+        self_id: u32,
+        xi: Vec3,
+        ui: Vec3,
+        k: usize,
+        blind_cos: f32,
+        max_dist_sq_cutoff: f32,
+        out_slice: &mut [NeighbourEntry],
+    ) -> usize {
+        debug_assert!(k > 0 && k <= 16 && out_slice.len() >= k);
+        let root_d2 = aabb_min_dist_sq(xi, self.nodes[0].aabb_min, self.nodes[0].aabb_max);
+        if root_d2 > max_dist_sq_cutoff {
+            return 0;
+        }
+        let mut best = [NeighbourEntry {
+            id: u32::MAX,
+            dist_sq: f32::INFINITY,
+        }; 16];
+        let mut best_len = 0usize;
+        let mut cutoff = max_dist_sq_cutoff;
+        let check_cone = blind_cos > -1.0;
+
+        // Warm-start `best` from `self_id`'s own spatial leaf (when valid) so `cutoff`
+        // tightens immediately in registers before top-down tree traversal!
+        let home_leaf = self
+            .bird_leaf
+            .get(self_id as usize)
+            .copied()
+            .unwrap_or(u32::MAX);
+        if (home_leaf as usize) < self.nodes.len() {
+            let hnode = self.nodes[home_leaf as usize];
+            if hnode.count > 0 {
+                let start = hnode.left_or_start as usize;
+                let end = start + (hnode.count as usize);
+                for idx in start..end {
+                    let cand_id = self.ordered_ids[idx];
+                    if cand_id == self_id {
+                        continue;
+                    }
+                    let diff = self.ordered_pos[idx] - xi;
+                    let d2_raw = diff.norm_sq();
+                    if d2_raw > cutoff {
+                        continue;
+                    }
+                    let d2 = if d2_raw == 0.0 { 0.0 } else { d2_raw };
+                    let cand = NeighbourEntry {
+                        id: cand_id,
+                        dist_sq: d2,
+                    };
+                    if best_len == k && cand.cmp_canonical(&best[k - 1]) != Ordering::Less {
+                        continue;
+                    }
+                    if check_cone && !is_in_fov_algebraic(diff, d2_raw, ui, blind_cos) {
+                        continue;
+                    }
+                    let mut ins = best_len;
+                    while ins > 0 && cand.cmp_canonical(&best[ins - 1]) == Ordering::Less {
+                        if ins < 16 {
+                            best[ins] = best[ins - 1];
+                        }
+                        ins -= 1;
+                    }
+                    best[ins] = cand;
+                    if best_len < k {
+                        best_len += 1;
+                    }
+                    if best_len == k {
+                        cutoff = best[k - 1].dist_sq.min(max_dist_sq_cutoff);
+                    }
+                }
             }
         }
 
-        best
+        let mut stack = [(0u32, root_d2); 64];
+        let mut sp = 1usize;
+
+        while sp > 0 {
+            sp -= 1;
+            let (node_idx, d_min_sq) = stack[sp];
+            if node_idx == home_leaf || d_min_sq > cutoff {
+                continue;
+            }
+            let node = self.nodes[node_idx as usize];
+            if (node.count == 0 || best_len < k)
+                && check_cone
+                && d_min_sq > 0.0
+                && aabb_strictly_in_blind_cone(
+                    xi,
+                    ui,
+                    blind_cos,
+                    node.aabb_min,
+                    node.aabb_max,
+                    d_min_sq,
+                )
+            {
+                continue;
+            }
+
+            if node.count > 0 {
+                let start = node.left_or_start as usize;
+                let end = start + (node.count as usize);
+                for idx in start..end {
+                    let cand_id = self.ordered_ids[idx];
+                    if cand_id == self_id {
+                        continue;
+                    }
+                    let diff = self.ordered_pos[idx] - xi;
+                    let d2_raw = diff.norm_sq();
+                    if d2_raw > cutoff {
+                        continue;
+                    }
+                    let d2 = if d2_raw == 0.0 { 0.0 } else { d2_raw };
+                    let cand = NeighbourEntry {
+                        id: cand_id,
+                        dist_sq: d2,
+                    };
+                    if best_len == k && cand.cmp_canonical(&best[k - 1]) != Ordering::Less {
+                        continue;
+                    }
+                    if check_cone && !is_in_fov_algebraic(diff, d2_raw, ui, blind_cos) {
+                        continue;
+                    }
+                    let mut ins = best_len;
+                    while ins > 0 && cand.cmp_canonical(&best[ins - 1]) == Ordering::Less {
+                        if ins < 16 {
+                            best[ins] = best[ins - 1];
+                        }
+                        ins -= 1;
+                    }
+                    best[ins] = cand;
+                    if best_len < k {
+                        best_len += 1;
+                    }
+                    if best_len == k {
+                        cutoff = best[k - 1].dist_sq.min(max_dist_sq_cutoff);
+                    }
+                }
+            } else {
+                let left = node.left_or_start;
+                let right = node.right_child;
+                let nl = &self.nodes[left as usize];
+                let nr = &self.nodes[right as usize];
+                let dl = aabb_min_dist_sq(xi, nl.aabb_min, nl.aabb_max);
+                let dr = aabb_min_dist_sq(xi, nr.aabb_min, nr.aabb_max);
+                let l_ok = dl <= cutoff && left != home_leaf;
+                let r_ok = dr <= cutoff && right != home_leaf;
+                if l_ok && r_ok {
+                    if dl <= dr {
+                        stack[sp] = (right, dr);
+                        stack[sp + 1] = (left, dl);
+                    } else {
+                        stack[sp] = (left, dl);
+                        stack[sp + 1] = (right, dr);
+                    }
+                    sp += 2;
+                } else if l_ok {
+                    stack[sp] = (left, dl);
+                    sp += 1;
+                } else if r_ok {
+                    stack[sp] = (right, dr);
+                    sp += 1;
+                }
+            }
+        }
+        out_slice[..best_len].copy_from_slice(&best[..best_len]);
+        best_len
     }
 
     fn query_metric(
@@ -575,15 +971,21 @@ pub struct WeightedGraph {
 
 impl WeightedGraph {
     pub fn from_neighbours(neighbours: &[Vec<NeighbourEntry>], symmetry: GraphSymmetry) -> Self {
-        let n = neighbours.len();
+        Self::from_flat_neighbours(&FlatNeighbourTable::from_vecs(neighbours), symmetry)
+    }
+
+    /// Two-pass contiguous CSR construction with zero per-bird heap `Vec` allocations.
+    pub fn from_flat_neighbours(flat: &FlatNeighbourTable, symmetry: GraphSymmetry) -> Self {
+        let n = flat.len();
         match symmetry {
             GraphSymmetry::DirectedNormalized => {
                 let mut row_offsets = Vec::with_capacity(n + 1);
                 row_offsets.push(0);
-                let total_edges: usize = neighbours.iter().map(|v| v.len()).sum();
+                let total_edges = flat.entries.len();
                 let mut col_indices = Vec::with_capacity(total_edges);
                 let mut weights = Vec::with_capacity(total_edges);
-                for row in neighbours {
+                for i in 0..n {
+                    let row = flat.row(i);
                     let w = if row.is_empty() {
                         0.0
                     } else {
@@ -602,34 +1004,60 @@ impl WeightedGraph {
                 }
             }
             GraphSymmetry::SymmetricMean | GraphSymmetry::SymmetricUnnormalized => {
-                let mut adj: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n];
-                for (i, row) in neighbours.iter().enumerate() {
-                    let w_dir = if row.is_empty() {
-                        0.0
-                    } else {
-                        1.0 / (row.len() as f32)
+                let mut counts = vec![0usize; n];
+                for i in 0..n {
+                    let row = flat.row(i);
+                    counts[i] += row.len();
+                    for e in row {
+                        counts[e.id as usize] += 1;
+                    }
+                }
+                let mut raw_offsets = Vec::with_capacity(n + 1);
+                raw_offsets.push(0usize);
+                for &c in &counts {
+                    raw_offsets.push(raw_offsets.last().unwrap() + c);
+                }
+                let total_raw = *raw_offsets.last().unwrap();
+                let mut scratch = vec![(0u32, 0.0f32); total_raw];
+                let mut write_cursor = raw_offsets[..n].to_vec();
+
+                for i in 0..n {
+                    let row = flat.row(i);
+                    let w_dir = match symmetry {
+                        GraphSymmetry::SymmetricMean => {
+                            if row.is_empty() {
+                                0.0
+                            } else {
+                                0.5 / (row.len() as f32)
+                            }
+                        }
+                        GraphSymmetry::SymmetricUnnormalized => 1.0,
+                        GraphSymmetry::DirectedNormalized => unreachable!(),
                     };
                     for e in row {
                         let j = e.id as usize;
-                        match symmetry {
-                            GraphSymmetry::SymmetricMean => {
-                                adj[i].push((j as u32, 0.5 * w_dir));
-                                adj[j].push((i as u32, 0.5 * w_dir));
-                            }
-                            GraphSymmetry::SymmetricUnnormalized => {
-                                adj[i].push((j as u32, 1.0));
-                                adj[j].push((i as u32, 1.0));
-                            }
-                            GraphSymmetry::DirectedNormalized => unreachable!(),
-                        }
+                        let ci = write_cursor[i];
+                        scratch[ci] = (j as u32, w_dir);
+                        write_cursor[i] = ci + 1;
+
+                        let cj = write_cursor[j];
+                        scratch[cj] = (i as u32, w_dir);
+                        write_cursor[j] = cj + 1;
                     }
                 }
+
                 let mut row_offsets = Vec::with_capacity(n + 1);
                 row_offsets.push(0);
-                let mut col_indices = Vec::new();
-                let mut weights = Vec::new();
-                for row in &mut adj {
-                    row.sort_by_key(|&(col, _)| col);
+                let mut col_indices = Vec::with_capacity(total_raw);
+                let mut weights = Vec::with_capacity(total_raw);
+
+                for i in 0..n {
+                    let s = raw_offsets[i];
+                    let e = raw_offsets[i + 1];
+                    let row = &mut scratch[s..e];
+                    row.sort_unstable_by(|a, b| {
+                        a.0.cmp(&b.0).then_with(|| canonical_f32_cmp(a.1, b.1))
+                    });
                     let mut idx = 0;
                     while idx < row.len() {
                         let col = row[idx].0;
@@ -646,6 +1074,7 @@ impl WeightedGraph {
                     }
                     row_offsets.push(col_indices.len());
                 }
+
                 Self {
                     row_offsets,
                     col_indices,

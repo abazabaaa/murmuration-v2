@@ -1,0 +1,23 @@
+{
+  "name": "murmuration-v2-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync-wasm": "mkdir -p public/wasm && cp ../target/wasm32-unknown-unknown/release/sim_wasm.wasm public/wasm/sim_wasm.wasm",
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "build": "pnpm run sync-wasm && tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.50",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}
