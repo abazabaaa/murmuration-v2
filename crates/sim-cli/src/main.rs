@@ -1,4 +1,5 @@
 mod stage2;
+mod stage3;
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -15,7 +16,8 @@ use sim_core::models::{
     MarginalSppConfig, MarginalSppFlock, PositionalInteractionConfig, SpeedControlLaw,
 };
 use sim_core::neighbour::{
-    query_neighbours_brute_force, GraphSymmetry, LbvhIndex, NeighbourRule, WeightedGraph,
+    query_neighbours_brute_force, FlatNeighbourTable, GraphSymmetry, LbvhIndex, NeighbourRule,
+    WeightedGraph,
 };
 use sim_core::rng::{keyed_rng, normal_vec3, uniform_open01, STREAM_INIT};
 use std::env;
@@ -233,12 +235,13 @@ fn run_gate1_oracle() -> Gate1OracleReport {
             let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
             let t1 = Instant::now();
-            let res = lbvh.query_all(&pos, &u, rule);
+            let flat_res = lbvh.query_all_flat(&pos, &u, rule);
             let query_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
             let oracle_match = if n == 1000 {
                 let oracle = query_neighbours_brute_force(&pos, &u, rule);
-                let ok = oracle == res;
+                let res_vecs = lbvh.query_all(&pos, &u, rule);
+                let ok = oracle == res_vecs && FlatNeighbourTable::from_vecs(&oracle) == flat_res;
                 if !ok {
                     stress_1500_ok = false;
                 }
@@ -1047,6 +1050,10 @@ fn main() {
             if !full.overall_stage2_passed {
                 std::process::exit(1);
             }
+        }
+        "stage3-native-parity" => {
+            let bundle = stage3::run_native_stage3_bundle();
+            println!("{}", serde_json::to_string_pretty(&bundle).unwrap());
         }
         "run" => {
             let path = args

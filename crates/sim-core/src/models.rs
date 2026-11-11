@@ -1,5 +1,7 @@
 use crate::math::{rodrigues_rotate_fixed_speed, Vec3};
-use crate::neighbour::{GraphSymmetry, LbvhIndex, NeighbourEntry, NeighbourRule, WeightedGraph};
+use crate::neighbour::{
+    FlatNeighbourTable, GraphSymmetry, LbvhIndex, NeighbourEntry, NeighbourRule, WeightedGraph,
+};
 use crate::rng::{keyed_rng, normal_vec3, STREAM_WIENER};
 use serde::{Deserialize, Serialize};
 
@@ -134,16 +136,14 @@ impl ConstantSpeedFlock {
         let t_now = (self.tick as f32) * dt;
         let u_list = self.headings(v0);
 
-        let owned_neighbours;
-        let neighbours: &[Vec<NeighbourEntry>] = match fixed_neighbours {
-            Some(nb) => nb,
+        let flat_nb: FlatNeighbourTable = match fixed_neighbours {
+            Some(nb) => FlatNeighbourTable::from_vecs(nb),
             None => {
                 let lbvh = LbvhIndex::build(&self.pos);
-                owned_neighbours = lbvh.query_all(&self.pos, &u_list, cfg.neighbour_rule);
-                &owned_neighbours
+                lbvh.query_all_flat(&self.pos, &u_list, cfg.neighbour_rule)
             }
         };
-        let graph = WeightedGraph::from_neighbours(neighbours, cfg.graph_symmetry);
+        let graph = WeightedGraph::from_flat_neighbours(&flat_nb, cfg.graph_symmetry);
 
         let mut next_pos = Vec::with_capacity(n);
         let mut next_vel = Vec::with_capacity(n);
@@ -163,7 +163,7 @@ impl ConstantSpeedFlock {
                 align_v_sum += self.vel[j as usize] * w;
             }
 
-            let mut f_pos_ext = compute_positional_force(i, &self.pos, &neighbours[i], &cfg.positional);
+            let mut f_pos_ext = compute_positional_force(i, &self.pos, flat_nb.row(i), &cfg.positional);
             if let Some(pulse) = cfg.turn_pulse {
                 if i < pulse.initiator_ids && t_now >= pulse.start_time_s && t_now <= pulse.end_time_s {
                     f_pos_ext += pulse.accel_vec;
@@ -290,16 +290,14 @@ impl MarginalSppFlock {
         let dt = cfg.dt;
         let headings = self.headings();
 
-        let owned_neighbours;
-        let neighbours: &[Vec<NeighbourEntry>] = match fixed_neighbours {
-            Some(nb) => nb,
+        let flat_nb: FlatNeighbourTable = match fixed_neighbours {
+            Some(nb) => FlatNeighbourTable::from_vecs(nb),
             None => {
                 let lbvh = LbvhIndex::build(&self.pos);
-                owned_neighbours = lbvh.query_all(&self.pos, &headings, cfg.neighbour_rule);
-                &owned_neighbours
+                lbvh.query_all_flat(&self.pos, &headings, cfg.neighbour_rule)
             }
         };
-        let graph = WeightedGraph::from_neighbours(neighbours, cfg.graph_symmetry);
+        let graph = WeightedGraph::from_flat_neighbours(&flat_nb, cfg.graph_symmetry);
 
         let noise_scale = libm::sqrtf(2.0 * cfg.d_v * dt);
         let mut next_pos = Vec::with_capacity(n);
@@ -333,7 +331,7 @@ impl MarginalSppFlock {
                 }
             };
 
-            let f_pos = compute_positional_force(i, &self.pos, &neighbours[i], &cfg.positional);
+            let f_pos = compute_positional_force(i, &self.pos, flat_nb.row(i), &cfg.positional);
 
             let mut rng = keyed_rng(cfg.master_seed, STREAM_WIENER, self.tick, i as u32);
             let dw = normal_vec3(&mut rng) * noise_scale;

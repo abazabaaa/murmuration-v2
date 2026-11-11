@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>Murmuration v2 — Coupled Speed–Heading SDE &amp; Instanced WebGPU</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --panel-bg: rgba(12, 16, 24, 0.82);
+        --panel-border: rgba(148, 163, 184, 0.22);
+        --accent: #38bdf8;
+        --text: #e2e8f0;
+        --muted: #94a3b8;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #090d16;
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        color: var(--text);
+      }
+      #gpu-canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        cursor: grab;
+      }
+      #gpu-canvas:active {
+        cursor: grabbing;
+      }
+      #hud {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        width: 340px;
+        max-height: calc(100vh - 24px);
+        overflow-y: auto;
+        padding: 12px 14px;
+        background: var(--panel-bg);
+        border: 1px solid var(--panel-border);
+        border-radius: 10px;
+        backdrop-filter: blur(10px);
+        font-size: 12px;
+        line-height: 1.4;
+        z-index: 10;
+      }
+      #hud h1 {
+        margin: 0 0 2px;
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+      .subtitle {
+        color: var(--muted);
+        font-size: 11px;
+        margin-bottom: 10px;
+      }
+      .section-title {
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--accent);
+        margin: 10px 0 6px;
+        border-top: 1px solid var(--panel-border);
+        padding-top: 8px;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+      select,
+      button {
+        background: rgba(30, 41, 59, 0.9);
+        color: var(--text);
+        border: 1px solid var(--panel-border);
+        border-radius: 6px;
+        padding: 4px 8px;
+        font-size: 11px;
+      }
+      button {
+        cursor: pointer;
+        transition: border-color 0.15s, background 0.15s;
+      }
+      button:hover {
+        border-color: var(--accent);
+        background: rgba(56, 189, 248, 0.16);
+      }
+      .btn-row {
+        display: flex;
+        gap: 6px;
+        margin: 8px 0;
+      }
+      .btn-row button {
+        flex: 1;
+      }
+      .slider-row {
+        margin-bottom: 5px;
+      }
+      .slider-row label {
+        display: flex;
+        justify-content: space-between;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .slider-row input[type="range"] {
+        width: 100%;
+        accent-color: var(--accent);
+        margin: 2px 0 0;
+      }
+      .metrics-grid {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 2px 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+      }
+      .metrics-grid .k {
+        color: var(--muted);
+      }
+      .metrics-grid .v {
+        text-align: right;
+      }
+      #error-banner {
+        display: none;
+        position: fixed;
+        inset: 24px;
+        margin: auto;
+        max-width: 560px;
+        max-height: 220px;
+        padding: 18px 20px;
+        background: rgba(127, 29, 29, 0.94);
+        border: 1px solid rgba(248, 113, 113, 0.5);
+        border-radius: 10px;
+        color: #fee2e2;
+        font-size: 13px;
+        z-index: 30;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="gpu-canvas"></canvas>
+    <div id="error-banner"></div>
+    <aside id="hud">
+      <h1>Murmuration v2</h1>
+      <div class="subtitle">
+        200 Hz Coupled SDE (<code>wasm32 +simd128</code>) &middot; Mode K 3D Starling WebGPU
+      </div>
+
+      <div class="row">
+        <label for="sel-birds">Flock Size (N)</label>
+        <select id="sel-birds">
+          <option value="1000" selected>1,000 birds</option>
+          <option value="2500">2,500 birds</option>
+          <option value="5000">5,000 birds</option>
+          <option value="10000">10,000 birds</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label for="sel-regime">Spatial Regime</label>
+        <select id="sel-regime">
+          <option value="0" selected>Calm Ribbon (1:2.8:5.6)</option>
+          <option value="1">5x Compacted Core</option>
+          <option value="2">3x Diluted Cloud</option>
+          <option value="3">Split Sub-Flocks + Stragglers</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label for="sel-lod">Mesh LOD</label>
+        <select id="sel-lod">
+          <option value="auto" selected>Auto Distance (440 / 48 tris)</option>
+          <option value="near">Force Near (440 tris)</option>
+          <option value="far">Force Far (48 tris)</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label><input type="checkbox" id="chk-follow" checked /> Follow Flock</label>
+        <label><input type="checkbox" id="chk-auto-zoom" checked /> Auto-Frame</label>
+        <label><input type="checkbox" id="chk-blur" checked /> Blur</label>
+      </div>
+
+      <div class="btn-row">
+        <button id="btn-frame" type="button" title="Center &amp; frame flock (F)">Frame Flock</button>
+        <button id="btn-wave" type="button">Turn Wave</button>
+        <button id="btn-pause" type="button">Pause</button>
+        <button id="btn-reset" type="button">Reset</button>
+      </div>
+
+      <div class="section-title">Coupled SDE Parameters</div>
+      <div class="slider-row">
+        <label><span>Alignment J_SPP (s⁻¹)</span><span id="val-jspp">18.0</span></label>
+        <input id="rng-jspp" type="range" min="2" max="50" step="0.5" value="18.0" />
+      </div>
+      <div class="slider-row">
+        <label><span>Angular Inertia τ_ω (s)</span><span id="val-tau">0.12</span></label>
+        <input id="rng-tau" type="range" min="0.0" max="0.50" step="0.01" value="0.12" />
+      </div>
+      <div class="slider-row">
+        <label><span>Marginal Speed λ</span><span id="val-lambda">0.35</span></label>
+        <input id="rng-lambda" type="range" min="0.05" max="2.50" step="0.05" value="0.35" />
+      </div>
+      <div class="slider-row">
+        <label><span>Cruise Speed v₀ (m/s)</span><span id="val-v0">12.0</span></label>
+        <input id="rng-v0" type="range" min="8.0" max="17.0" step="0.2" value="12.0" />
+      </div>
+      <div class="slider-row">
+        <label><span>Noise D_v (m²/s³)</span><span id="val-dv">0.28</span></label>
+        <input id="rng-dv" type="range" min="0.00" max="1.20" step="0.02" value="0.28" />
+      </div>
+      <div class="slider-row">
+        <label><span>Vertical Slab Gain g_z</span><span id="val-gz">2.20</span></label>
+        <input id="rng-gz" type="range" min="1.00" max="4.00" step="0.10" value="2.20" />
+      </div>
+      <div class="slider-row">
+        <label><span>Roost Radius R_roost (m)</span><span id="val-roost">65</span></label>
+        <input id="rng-roost" type="range" min="25" max="180" step="5" value="65" />
+      </div>
+
+      <div class="section-title">Frame Budget (§4.2.1)</div>
+      <div class="metrics-grid" id="budget-readout">
+        <span class="k">t_sim_tick:</span><span class="v" id="m-sim-tick">-- ms</span>
+        <span class="k">ticks / frame (debt):</span><span class="v" id="m-ticks">-- (0)</span>
+        <span class="k">t_sim_frame:</span><span class="v" id="m-sim-frame">-- ms</span>
+        <span class="k">t_upload (writeBuffer):</span><span class="v" id="m-upload">-- ms</span>
+        <span class="k">t_render (encode/GPU):</span><span class="v" id="m-render">-- ms</span>
+        <span class="k">t_frame_total (p95):</span><span class="v" id="m-total">-- ms</span>
+      </div>
+
+      <div class="section-title">Flock State (O(N) Live)</div>
+      <div class="metrics-grid">
+        <span class="k">Polarization Φ:</span><span class="v" id="m-phi">--</span>
+        <span class="k">Speed mean [min..max]:</span><span class="v" id="m-speed">--</span>
+        <span class="k">RMS Radius (m):</span><span class="v" id="m-radius">--</span>
+        <span class="k">Sim Tick (200 Hz):</span><span class="v" id="m-tick-idx">0</span>
+      </div>
+
+      <div class="btn-row" style="margin-top: 10px">
+        <button id="btn-bench" type="button">Run 12-Cell Stress Benchmark</button>
+      </div>
+      <div id="bench-status" class="subtitle" style="margin: 4px 0 0"></div>
+    </aside>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

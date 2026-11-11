@@ -1,7 +1,7 @@
 use crate::generate_stress_cloud;
 use rayon::prelude::*;
 use serde::Serialize;
-use sim_core::coupled::{CoupledConfig, CoupledFlock};
+use sim_core::coupled::{CoupledConfig, CoupledFlock, RoostBoundaryConfig};
 use sim_core::eval::{
     compute_polarization, compute_spatial_aspect_ratios, compute_spatial_correlations,
     compute_topological_anisotropy_gamma, wasserstein_1d, AspectRatioSummary,
@@ -229,6 +229,7 @@ fn run_reduction_gate() -> ReductionGateReport {
             graph_symmetry: GraphSymmetry::SymmetricMean,
             positional: pos_cfg,
             turn_pulse: None,
+            roost: RoostBoundaryConfig::default(),
         };
         let mut cf = CoupledFlock::from_cartesian(p0_det.clone(), v0_det.clone());
         for _ in 0..steps_det {
@@ -419,6 +420,7 @@ fn run_reduction_gate() -> ReductionGateReport {
                         graph_symmetry: GraphSymmetry::SymmetricMean,
                         positional: pos_stoch,
                         turn_pulse: None,
+                        roost: RoostBoundaryConfig::default(),
                     };
                     let mut flock = CoupledFlock::from_cartesian(p0, v0);
                     for _ in 0..burn_steps {
@@ -585,6 +587,7 @@ fn run_reduction_gate() -> ReductionGateReport {
             graph_symmetry: GraphSymmetry::SymmetricMean,
             positional: PositionalInteractionConfig::default(),
             turn_pulse: Some(pulse),
+            roost: RoostBoundaryConfig::default(),
         };
         let mut cf = CoupledFlock::from_cartesian(ribbon_pos.clone(), init_vel.clone());
         let mut rec = TurnWaveRecorder::new(ribbon_pos.clone(), 9, Vec3::EX, dt);
@@ -736,6 +739,7 @@ fn run_exp2_factorial() -> Exp2FactorialReport {
                         graph_symmetry: GraphSymmetry::SymmetricMean,
                         positional: pos_cfg,
                         turn_pulse: None,
+                        roost: RoostBoundaryConfig::default(),
                     };
                     let mut flock = CoupledFlock::from_cartesian(p0, v0_init);
                     for _ in 0..burn_steps {
@@ -848,6 +852,7 @@ fn run_exp2_factorial() -> Exp2FactorialReport {
                 accel_vec: Vec3::new(-12.0, 0.0, 0.0),
                 initiator_ids: 9,
             }),
+            roost: RoostBoundaryConfig::default(),
         };
         let mut turn_flock = CoupledFlock::from_cartesian(ribbon_pos.clone(), init_vel_rib.clone());
         let mut turn_rec = TurnWaveRecorder::new(ribbon_pos.clone(), 9, Vec3::EX, dt);
@@ -1008,6 +1013,7 @@ fn run_exp3_positional_factorial() -> Exp3PositionalReport {
                         vertical_coh_gain: vert_gain,
                     },
                     turn_pulse: None,
+                    roost: RoostBoundaryConfig::default(),
                 };
 
                 let mut flock = CoupledFlock::from_cartesian(p0, v0);
