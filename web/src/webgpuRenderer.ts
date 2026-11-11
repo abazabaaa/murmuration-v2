@@ -473,7 +473,7 @@ export class StarlingWebGpuRenderer {
 
     const eye = computeCameraEye(cam);
     const aspect = this.texWidth / Math.max(1, this.texHeight);
-    const proj = mat4Perspective(cam.fovYRad, aspect, 0.4, 2400.0);
+    const proj = mat4Perspective(cam.fovYRad, aspect, 0.4, 12000.0);
     const view = mat4LookAtZUp(eye, cam.target);
     const viewProj = mat4Multiply(proj, view);
     const prevVp = this.prevViewProj ?? viewProj;

@@ -13,6 +13,7 @@ export interface SimExports extends WebAssembly.Exports {
     kRep: number,
     verticalCohGain: number
   ): void;
+  sim_set_roost_params(handle: number, roostRadiusM: number, roostPullMps2: number): void;
   sim_trigger_turn_pulse(
     handle: number,
     initiatorCount: number,
@@ -38,6 +39,8 @@ export interface CoupledParams {
   kCoh: number;
   kRep: number;
   verticalCohGain: number;
+  roostRadiusM: number;
+  roostPullMps2: number;
 }
 
 export interface LiveTelemetry {
@@ -46,6 +49,7 @@ export interface LiveTelemetry {
   maxSpeedMps: number;
   centroid: [number, number, number];
   rmsRadiusM: number;
+  coreRmsRadiusM: number;
   polarizationPhi: number;
   tickCount: number;
 }
@@ -134,6 +138,7 @@ export class WasmFlockSimulation {
       p.kRep,
       p.verticalCohGain
     );
+    this.ex.sim_set_roost_params(this.handle, p.roostRadiusM, p.roostPullMps2);
   }
 
   triggerTurnWave(initiatorCount = 16, accelMag = 24.0, durationS = 0.22): void {
@@ -197,12 +202,13 @@ export class WasmFlockSimulation {
         maxSpeedMps: 0,
         centroid: [0, 0, 0],
         rmsRadiusM: 10,
+        coreRmsRadiusM: 10,
         polarizationPhi: 0,
         tickCount: 0,
       };
     }
     const ptr = this.ex.sim_write_telemetry(this.handle) >>> 0;
-    const view = new Float32Array(this.ex.memory.buffer, ptr, 8);
+    const view = new Float32Array(this.ex.memory.buffer, ptr, 9);
     return {
       meanSpeedMps: view[0],
       minSpeedMps: view[1],
@@ -210,6 +216,7 @@ export class WasmFlockSimulation {
       centroid: [view[3], view[4], view[5]],
       rmsRadiusM: view[6],
       polarizationPhi: view[7],
+      coreRmsRadiusM: view[8],
       tickCount: this.ex.sim_tick_count(this.handle) >>> 0,
     };
   }

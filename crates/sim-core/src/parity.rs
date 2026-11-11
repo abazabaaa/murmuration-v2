@@ -1,4 +1,4 @@
-use crate::coupled::{CoupledConfig, CoupledFlock};
+use crate::coupled::{CoupledConfig, CoupledFlock, RoostBoundaryConfig};
 use crate::eval::{
     compute_polarization, compute_spatial_correlations, SpeedAccumulator, TurnWaveRecorder,
 };
@@ -34,13 +34,23 @@ pub fn default_coupled_browser_config(master_seed: u64) -> CoupledConfig {
         },
         graph_symmetry: GraphSymmetry::SymmetricMean,
         positional: PositionalInteractionConfig {
-            k_coh: 1.15,
-            r0_m: 1.15,
-            k_rep: 2.20,
+            k_coh: 0.55,
+            r0_m: 1.35,
+            k_rep: 3.40,
             n_rep: 1,
             vertical_coh_gain: 2.20,
         },
         turn_pulse: None,
+        roost: RoostBoundaryConfig {
+            symmetric_saturating_cohesion: true,
+            rep_shell_m: 5.2,
+            coh_shell_m: 6.8,
+            coh_sat_m: 7.0,
+            roost_radius_m: 65.0,
+            roost_pull_mps2: 7.5,
+            roost_alt_band_m: 24.0,
+            roost_vertical_pull_mps2: 3.2,
+        },
     }
 }
 
@@ -278,6 +288,7 @@ pub fn run_tost_seed_rollout(seed: u64, n_birds: usize) -> TostSeedSummary {
             end_time_s: 0.14,
             accel_vec: Vec3::new(0.0, 14.0, 0.0),
         }),
+        roost: RoostBoundaryConfig::default(),
     };
     let mut wave_flock = CoupledFlock::from_cartesian(pw.clone(), vw);
     let frozen_nb = crate::neighbour::LbvhIndex::build(&pw).query_all(

@@ -20,7 +20,7 @@ pub struct WasmSimHandle {
     pub flock: CoupledFlock,
     pub gait: BirdVisualGaitBank,
     pub interp: PoseInterpolator,
-    pub telemetry: [f32; 8],
+    pub telemetry: [f32; 9],
 }
 
 impl WasmSimHandle {
@@ -37,7 +37,7 @@ impl WasmSimHandle {
             flock,
             gait,
             interp,
-            telemetry: [0.0; 8],
+            telemetry: [0.0; 9],
         };
         h.refresh_telemetry();
         h
@@ -46,7 +46,7 @@ impl WasmSimHandle {
     pub fn refresh_telemetry(&mut self) {
         let n = self.flock.pos.len();
         if n == 0 {
-            self.telemetry = [0.0; 8];
+            self.telemetry = [0.0; 9];
             return;
         }
         let inv_n = 1.0 / (n as f32);
@@ -76,24 +76,57 @@ impl WasmSimHandle {
         cx *= inv_n;
         cy *= inv_n;
         cz *= inv_n;
-        let c = Vec3::new(cx, cy, cz);
+        let c0 = Vec3::new(cx, cy, cz);
         let mut rms_r2 = 0.0f32;
         for &p in &self.flock.pos {
-            rms_r2 += (p - c).norm_sq();
+            rms_r2 += (p - c0).norm_sq();
         }
         let rms_r = libm::sqrtf(rms_r2 * inv_n);
+
+        // Two-pass Cauchy-weighted core centroid so stragglers or split packets never pull the camera into empty air
+        let mut c_core = c0;
+        for &scale_m in &[45.0f32, 24.0f32] {
+            let inv_s2 = 1.0 / (scale_m * scale_m);
+            let mut w_sum = 0.0f32;
+            let mut wp_sum = Vec3::ZERO;
+            for &p in &self.flock.pos {
+                let d2 = (p - c_core).norm_sq();
+                let w = 1.0 / (1.0 + d2 * inv_s2);
+                w_sum += w;
+                wp_sum += p * w;
+            }
+            if w_sum > 1e-6 {
+                c_core = wp_sum * (1.0 / w_sum);
+            }
+        }
+        let mut core_w_sum = 0.0f32;
+        let mut core_r2_sum = 0.0f32;
+        let inv_core_s2 = 1.0 / (36.0f32 * 36.0f32);
+        for &p in &self.flock.pos {
+            let d2 = (p - c_core).norm_sq();
+            let w = 1.0 / (1.0 + d2 * inv_core_s2);
+            core_w_sum += w;
+            core_r2_sum += w * d2;
+        }
+        let core_rms_r = if core_w_sum > 1e-6 {
+            libm::sqrtf(core_r2_sum / core_w_sum)
+        } else {
+            rms_r
+        };
+
         let phi = (sum_u * inv_n).norm();
 
-        // [0] mean_speed, [1] min_speed, [2] max_speed, [3] cx, [4] cy, [5] cz, [6] rms_radius, [7] phi
+        // [0] mean_speed, [1] min_speed, [2] max_speed, [3..6] core_centroid, [6] rms_radius, [7] phi, [8] core_rms_radius
         self.telemetry = [
             sum_s * inv_n,
             min_s,
             max_s,
-            cx,
-            cy,
-            cz,
+            c_core.x,
+            c_core.y,
+            c_core.z,
             rms_r,
             phi,
+            core_rms_r,
         ];
     }
 }
@@ -151,6 +184,22 @@ pub unsafe extern "C" fn sim_set_params(
     h.cfg.positional.k_coh = k_coh.max(0.0);
     h.cfg.positional.k_rep = k_rep.max(0.0);
     h.cfg.positional.vertical_coh_gain = vertical_coh_gain.max(0.2);
+}
+
+/// # Safety
+/// `handle` must be a valid pointer returned by `sim_create`.
+#[no_mangle]
+pub unsafe extern "C" fn sim_set_roost_params(
+    handle: *mut WasmSimHandle,
+    roost_radius_m: f32,
+    roost_pull_mps2: f32,
+) {
+    if handle.is_null() {
+        return;
+    }
+    let h = &mut *handle;
+    h.cfg.roost.roost_radius_m = roost_radius_m.max(0.0);
+    h.cfg.roost.roost_pull_mps2 = roost_pull_mps2.max(0.0);
 }
 
 /// # Safety

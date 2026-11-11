@@ -189,12 +189,14 @@
       </div>
 
       <div class="row">
-        <label><input type="checkbox" id="chk-follow" checked /> Follow Centroid</label>
-        <label><input type="checkbox" id="chk-blur" checked /> Shutter Blur</label>
+        <label><input type="checkbox" id="chk-follow" checked /> Follow Flock</label>
+        <label><input type="checkbox" id="chk-auto-zoom" checked /> Auto-Frame</label>
+        <label><input type="checkbox" id="chk-blur" checked /> Blur</label>
       </div>
 
       <div class="btn-row">
-        <button id="btn-wave" type="button">Trigger Turn Wave</button>
+        <button id="btn-frame" type="button" title="Center &amp; frame flock (F)">Frame Flock</button>
+        <button id="btn-wave" type="button">Turn Wave</button>
         <button id="btn-pause" type="button">Pause</button>
         <button id="btn-reset" type="button">Reset</button>
       </div>
@@ -223,6 +225,10 @@
       <div class="slider-row">
         <label><span>Vertical Slab Gain g_z</span><span id="val-gz">2.20</span></label>
         <input id="rng-gz" type="range" min="1.00" max="4.00" step="0.10" value="2.20" />
+      </div>
+      <div class="slider-row">
+        <label><span>Roost Radius R_roost (m)</span><span id="val-roost">65</span></label>
+        <input id="rng-roost" type="range" min="25" max="180" step="5" value="65" />
       </div>
 
       <div class="section-title">Frame Budget (§4.2.1)</div>

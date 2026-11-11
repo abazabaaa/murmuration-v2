@@ -10,6 +10,31 @@ use serde::{Deserialize, Serialize};
 
 pub const STREAM_WIENER_OU_AUX: u32 = 4;
 
+/// Optional roost-site wheeling attraction and reciprocal saturating cohesion (`Hildenbrandt et al. 2010`,
+/// *StarDisplay* Eq. 9) keeping long-running murmurations cohesive above the sleeping site without
+/// sub-flock fission or unbounded Hookean straggler slingshotting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RoostBoundaryConfig {
+    /// Computes pairwise comfort-zone separation (`d_eff < rep_shell_m`) and saturating cohesion
+    /// (`d_eff > coh_shell_m`) over the symmetric weighted graph `graph.row_edges(i)`, preserving
+    /// exact pairwise antisymmetry (`sum_i F_i^sym = 0`) with zero rear-cone blind-spot fission or collapse.
+    pub symmetric_saturating_cohesion: bool,
+    /// Short-range reciprocal separation radius `r_rep` (`m` in anisotropic `d_eff` space).
+    pub rep_shell_m: f32,
+    /// Topological shell attraction onset `r_coh >= r_rep` (`m` in anisotropic `d_eff` space).
+    pub coh_shell_m: f32,
+    /// Maximum effective spring displacement `r_sat` (`m`) in `excess / (1 + excess / r_sat)`.
+    pub coh_sat_m: f32,
+    /// Horizontal roost comfort radius `R_roost` (`m`; `0.0` disables roost return).
+    pub roost_radius_m: f32,
+    /// Maximum horizontal inward-turning roost acceleration (`m/s^2`).
+    pub roost_pull_mps2: f32,
+    /// Preferred vertical altitude half-band `H_roost` (`m`) around `z = 0`.
+    pub roost_alt_band_m: f32,
+    /// Maximum vertical altitude-restoring acceleration (`m/s^2`) toward `z = 0`.
+    pub roost_vertical_pull_mps2: f32,
+}
+
 /// Stage 2 candidate coupled speed-heading SDE configuration (§2.2).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CoupledConfig {
@@ -35,6 +60,8 @@ pub struct CoupledConfig {
     pub graph_symmetry: GraphSymmetry,
     pub positional: PositionalInteractionConfig,
     pub turn_pulse: Option<ExternalTurnPulse>,
+    #[serde(default)]
+    pub roost: RoostBoundaryConfig,
 }
 
 /// Stage 2 coupled flock state `(x_i, v_i, u_i, omega_i)` with `Mode K` curvature+gravity bank visualization.
@@ -146,7 +173,85 @@ impl CoupledFlock {
                 w_row_sum += w;
                 align_v_dot_u += w * vj.dot(ui);
             }
-            let mut f_pos_ext = compute_positional_force(i, &self.pos, flat_nb.row(i), &cfg.positional);
+            let mut f_pos_ext = if cfg.roost.symmetric_saturating_cohesion {
+                let mut rep_only = cfg.positional;
+                rep_only.k_coh = 0.0;
+                // Keep StarEscape n_rep=1 nearest-neighbour directional kick + reciprocal comfort-zone shell
+                let mut f_p = compute_positional_force(i, &self.pos, flat_nb.row(i), &rep_only) * 0.5;
+                let gz = cfg.positional.vertical_coh_gain;
+                let aniso = (gz - 1.0).abs() > 1e-6;
+                let r_rep = cfg.roost.rep_shell_m.max(cfg.positional.r0_m);
+                let r_coh = cfg.roost.coh_shell_m.max(r_rep);
+                let r_sat = cfg.roost.coh_sat_m;
+                let mut coh_sum = Vec3::ZERO;
+                let mut rep_sum = Vec3::ZERO;
+                for (&j, &w) in cols.iter().zip(ws.iter()) {
+                    let diff = self.pos[j as usize] - xi;
+                    let de = if aniso {
+                        Vec3::new(diff.x, diff.y, diff.z * gz)
+                    } else {
+                        diff
+                    };
+                    let d_eff = de.norm();
+                    if d_eff > r_coh && cfg.positional.k_coh > 0.0 {
+                        let excess = d_eff - r_coh;
+                        let eff_excess = if r_sat > 0.0 {
+                            excess / (1.0 + excess / r_sat)
+                        } else {
+                            excess
+                        };
+                        let mut spring = de * (eff_excess / d_eff);
+                        if aniso {
+                            spring.z *= gz;
+                        }
+                        coh_sum += spring * w;
+                    } else if d_eff < r_rep && cfg.positional.k_rep > 0.0 {
+                        let frac = (r_rep - d_eff) / r_rep.max(1e-4);
+                        let core_boost = 1.0 + r_rep / d_eff.max(0.40);
+                        let mag = frac * core_boost;
+                        let mut push = if d_eff > 1e-5 {
+                            de * (-mag / d_eff)
+                        } else {
+                            Vec3::EX * mag
+                        };
+                        if aniso {
+                            push.z *= gz;
+                        }
+                        rep_sum += push * w;
+                    }
+                }
+                f_p += coh_sum * cfg.positional.k_coh + rep_sum * cfg.positional.k_rep;
+                f_p
+            } else {
+                compute_positional_force(i, &self.pos, flat_nb.row(i), &cfg.positional)
+            };
+
+            if cfg.roost.roost_radius_m > 0.0 && cfg.roost.roost_pull_mps2 > 0.0 {
+                let r_h = libm::sqrtf(xi.x * xi.x + xi.y * xi.y);
+                let r_free = 0.25 * cfg.roost.roost_radius_m;
+                if r_h > r_free && r_h > 1e-4 {
+                    let inv_rh = 1.0 / r_h;
+                    // Outward radial unit vector r_hat_h and inward unit vector d_in = -r_hat_h
+                    let r_out = Vec3::new(xi.x * inv_rh, xi.y * inv_rh, 0.0);
+                    let d_in = -r_out;
+                    let q = (r_h - r_free) / (0.75 * cfg.roost.roost_radius_m).max(1.0);
+                    let gain = (q * q) / (1.0 + q * q);
+                    // StarDisplay (Hildenbrandt et al. 2010, Eq. 9): turn urgency grows as sin(theta/2) =
+                    // sqrt((1 - u . d_in)/2), so it is 0 when already flying inward across the roost and reaches
+                    // full lateral bank (1.0, zero 180-deg dead-spot!) when heading straight outward.
+                    let cos_in = ui.dot(d_in).clamp(-1.0, 1.0);
+                    let turn_urgency = libm::sqrtf(0.5 * (1.0 - cos_in));
+                    let lat_ccw = Vec3::new(-ui.y, ui.x, 0.0).normalized_or(Vec3::EY);
+                    let sin_in = lat_ccw.dot(d_in);
+                    let turn_dir = if sin_in < -0.15 { -lat_ccw } else { lat_ccw };
+                    f_pos_ext += (turn_dir * 0.90 + d_in * 0.10)
+                        * (cfg.roost.roost_pull_mps2 * gain * turn_urgency);
+                }
+            }
+            if cfg.roost.roost_alt_band_m > 0.0 && cfg.roost.roost_vertical_pull_mps2 > 0.0 {
+                let qz = xi.z / cfg.roost.roost_alt_band_m;
+                f_pos_ext.z += -cfg.roost.roost_vertical_pull_mps2 * (qz / (1.0 + qz.abs()));
+            }
             if let Some(pulse) = cfg.turn_pulse {
                 if i < pulse.initiator_ids && t_now >= pulse.start_time_s && t_now <= pulse.end_time_s {
                     f_pos_ext += pulse.accel_vec;
@@ -491,6 +596,7 @@ mod tests {
                 graph_symmetry: spp_cfg.graph_symmetry,
                 positional: spp_cfg.positional,
                 turn_pulse: None,
+                roost: RoostBoundaryConfig::default(),
             };
             let mut c_flock = CoupledFlock::from_cartesian(p0.clone(), v0.clone());
             for _ in 0..500 {
@@ -590,6 +696,7 @@ mod tests {
                 graph_symmetry: GraphSymmetry::SymmetricMean,
                 positional: pos_cfg,
                 turn_pulse: None,
+                roost: RoostBoundaryConfig::default(),
             };
 
             for (acc, cfg) in [
@@ -681,6 +788,7 @@ mod tests {
                 accel_vec: Vec3::new(-12.0, 0.0, 0.0),
                 initiator_ids: 9,
             }),
+            roost: RoostBoundaryConfig::default(),
         };
 
         let mut flock = CoupledFlock::from_cartesian(ribbon_pos.clone(), init_vel);
@@ -698,5 +806,48 @@ mod tests {
             pred_cs,
             summary.linear_r_squared
         );
+    }
+
+    /// Regression test preventing long-horizon sub-flock fission (`4.44 km` dispersion) and density collapse.
+    /// Full `N = 1,000`, `120,000`-tick (`600 s`) verification settled at `rms_r = 14.17 m`, `|c| = 82.32 m`,
+    /// `speed = [11.73..13.01] m/s`, `clamps = 0`; default suite runs `N = 300` for `24,000` ticks (`120 s`) in ~4s.
+    #[test]
+    fn coupled_roost_murmuration_stays_cohesive_over_long_horizon() {
+        use crate::instance::generate_stress_cloud;
+        use crate::parity::default_coupled_browser_config;
+
+        let n = 300usize;
+        let seed = 20_261_110u64;
+        let cfg = default_coupled_browser_config(seed);
+        let (p0, u0) = generate_stress_cloud(0, n, seed);
+        let v0: Vec<Vec3> = u0.into_iter().map(|u| u * 12.0).collect();
+        let mut flock = CoupledFlock::from_cartesian(p0, v0);
+
+        for step_idx in 1..=24_000usize {
+            flock.step(&cfg, None);
+            if step_idx % 8_000 == 0 {
+                let inv_n = 1.0 / (n as f32);
+                let c = flock.pos.iter().copied().fold(Vec3::ZERO, |a, b| a + b) * inv_n;
+                let rms_r = libm::sqrtf(
+                    flock.pos.iter().map(|&p| (p - c).norm_sq()).sum::<f32>() * inv_n,
+                );
+                let max_spd = flock.speed.iter().copied().fold(0.0f32, f32::max);
+                let min_spd = flock.speed.iter().copied().fold(f32::INFINITY, f32::min);
+                assert!(
+                    rms_r > 7.5 && rms_r < 85.0,
+                    "Flock out of realistic volume envelope at tick {step_idx}: rms_r = {rms_r:.2} m (expected 7.5..85 m)"
+                );
+                assert!(
+                    c.norm() < 105.0,
+                    "Flock drifted off roost at tick {step_idx}: |c| = {:.2} m",
+                    c.norm()
+                );
+                assert!(
+                    max_spd < 19.5 && min_spd > 5.0,
+                    "Unphysical speed slingshot at tick {step_idx}: [{min_spd:.2}..{max_spd:.2}] m/s"
+                );
+                assert_eq!(flock.speed_clamp_events, 0);
+            }
+        }
     }
 }

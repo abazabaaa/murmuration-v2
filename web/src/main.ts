@@ -101,7 +101,9 @@ async function main(): Promise<void> {
   const selRegime = document.getElementById("sel-regime") as HTMLSelectElement;
   const selLod = document.getElementById("sel-lod") as HTMLSelectElement;
   const chkFollow = document.getElementById("chk-follow") as HTMLInputElement;
+  const chkAutoZoom = document.getElementById("chk-auto-zoom") as HTMLInputElement;
   const chkBlur = document.getElementById("chk-blur") as HTMLInputElement;
+  const btnFrame = document.getElementById("btn-frame") as HTMLButtonElement;
   const btnWave = document.getElementById("btn-wave") as HTMLButtonElement;
   const btnPause = document.getElementById("btn-pause") as HTMLButtonElement;
   const btnReset = document.getElementById("btn-reset") as HTMLButtonElement;
@@ -114,9 +116,11 @@ async function main(): Promise<void> {
     lambda: parseFloat((document.getElementById("rng-lambda") as HTMLInputElement).value),
     v0: parseFloat((document.getElementById("rng-v0") as HTMLInputElement).value),
     dV: parseFloat((document.getElementById("rng-dv") as HTMLInputElement).value),
-    kCoh: 1.15,
-    kRep: 2.2,
+    kCoh: 0.55,
+    kRep: 3.40,
     verticalCohGain: parseFloat((document.getElementById("rng-gz") as HTMLInputElement).value),
+    roostRadiusM: parseFloat((document.getElementById("rng-roost") as HTMLInputElement).value),
+    roostPullMps2: 7.5,
   });
 
   const sliderBindings: Array<[string, string, number]> = [
@@ -126,6 +130,7 @@ async function main(): Promise<void> {
     ["rng-v0", "val-v0", 1],
     ["rng-dv", "val-dv", 2],
     ["rng-gz", "val-gz", 2],
+    ["rng-roost", "val-roost", 0],
   ];
   for (const [rngId, valId, digits] of sliderBindings) {
     const inp = document.getElementById(rngId) as HTMLInputElement;
@@ -146,20 +151,41 @@ async function main(): Promise<void> {
 
   let paused = false;
   let benchmarkRunning = false;
+  let zoomScale = 1.0;
+
+  const computeFramedDistance = (coreRmsM: number): number => {
+    const base = Math.max(24, Math.min(260, coreRmsM * 2.35));
+    return Math.max(8, Math.min(1800, base * zoomScale));
+  };
+
+  const snapFrameFlock = () => {
+    const tel = sim.readTelemetry();
+    zoomScale = 1.0;
+    chkFollow.checked = true;
+    cam.target = [...tel.centroid];
+    cam.distance = computeFramedDistance(tel.coreRmsRadiusM);
+  };
 
   const initFlockFromUi = () => {
     const n = parseInt(selBirds.value, 10);
     const r = parseInt(selRegime.value, 10);
+    zoomScale = 1.0;
     sim.reset(r, n, 20261110n, readParamsFromUi());
     renderer.resetHistory();
     const tel = sim.readTelemetry();
     cam.target = [...tel.centroid];
-    cam.distance = defaultDistanceForRegime(r, n);
+    cam.distance = r === 3 ? 240 : computeFramedDistance(tel.coreRmsRadiusM);
   };
 
   selBirds.addEventListener("change", initFlockFromUi);
   selRegime.addEventListener("change", initFlockFromUi);
   btnReset.addEventListener("click", initFlockFromUi);
+  btnFrame.addEventListener("click", snapFrameFlock);
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "f" || e.key === "F") {
+      snapFrameFlock();
+    }
+  });
   btnWave.addEventListener("click", () => {
     const initCount = Math.max(8, Math.round(sim.birdCount * 0.02));
     sim.triggerTurnWave(initCount, 24.0, 0.24);
@@ -195,7 +221,12 @@ async function main(): Promise<void> {
     "wheel",
     (e) => {
       e.preventDefault();
-      cam.distance = Math.max(6, Math.min(900, cam.distance * Math.exp(e.deltaY * 0.0012)));
+      const factor = Math.exp(e.deltaY * 0.0012);
+      if (chkAutoZoom.checked) {
+        zoomScale = Math.max(0.25, Math.min(6.0, zoomScale * factor));
+      } else {
+        cam.distance = Math.max(6, Math.min(2400, cam.distance * factor));
+      }
     },
     { passive: false }
   );
@@ -381,6 +412,11 @@ async function main(): Promise<void> {
         cam.target[0] += (tel.centroid[0] - cam.target[0]) * followRate;
         cam.target[1] += (tel.centroid[1] - cam.target[1]) * followRate;
         cam.target[2] += (tel.centroid[2] - cam.target[2]) * followRate;
+      }
+      if (chkAutoZoom.checked) {
+        const zoomRate = 1.0 - Math.exp(-dtS * 3.0);
+        const desiredDist = computeFramedDistance(tel.coreRmsRadiusM);
+        cam.distance += (desiredDist - cam.distance) * zoomRate;
       }
       const rt = renderer.renderFrame(
         sim.wasmMemoryBuffer,
