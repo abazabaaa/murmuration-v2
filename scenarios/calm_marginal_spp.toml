@@ -1,0 +1,28 @@
+name = "calm_marginal_spp"
+n_birds = 500
+duration_s = 12.0
+burn_in_s = 4.0
+model_family = "marginal_spp"
+
+[config]
+dt = 0.005
+master_seed = 20261110
+j_spp = 4.5
+d_v = 1.2
+graph_symmetry = "symmetric_mean"
+
+[config.speed_control]
+speed_law = "marginal_octic"
+lambda = 1.2
+v0 = 12.0
+
+[config.neighbour_rule]
+kind = "exact_topo_k"
+k = 7
+blind_cos = -0.5
+
+[config.positional]
+k_coh = 1.0
+r0_m = 1.1
+k_rep = 1.4
+n_rep = 1
