@@ -1,21 +1,37 @@
 # murmuration-v2
 
-Physics-grounded 3D starling murmuration simulation, multi-rate quantitative evaluation harness, and instanced WebGPU viewer.
+Physics-grounded 3D starling murmuration simulation and quantitative evaluation harness.
 
-## Staged Gate Architecture
+## Stage 1 Architecture (Native Rust Reference Harness)
 
-Development is organized into four sequential, quantitatively gated stages:
+- `crates/sim-core`: Pure-Rust (`libm` deterministic floating-point, counter-keyed `ChaCha8Rng` streams) simulation and observable core:
+  - **Exact Reference Models**:
+    - `Ref-ISM`: Constant-speed Inertial Spin Model (Cavagna et al. 2015) + matched constant-speed Overdamped Vicsek comparator, with explicit graph reciprocity switches (`SymmetricMean`, `DirectedNormalized`, `SymmetricUnnormalized`).
+    - `Ref-MarginalSPP`: Cartesian variable-speed self-propelled particle model (Cavagna et al. 2022) comparing octic marginal speed confinement against linear Gaussian speed control with zero artificial speed clamps.
+  - **Exact Biological Neighbour Rules vs. Spatial Acceleration**:
+    - `ExactTopoK` (`k = 7` in field-of-view over `R^3`) decoupled from explicit biological model variants (`BoundedTopoK`, `OctantTopoK`, `MetricRadius`).
+    - Morton-ordered `LbvhIndex` verified for 100% exact ID, order, and squared-distance parity against the `O(N^2)` `query_neighbours_brute_force` oracle across exact ties, coincident positions, `0` and `< 7` eligible neighbours, and four density stress regimes.
+  - **Multi-Rate Kinematic Evaluators**:
+    - `200 Hz` (`dt = 5 ms`) full-tick directional turn-wave propagation speed (`E7`),
+    - `40 Hz` centre-of-mass (`E6a`) and mutual-neighbour (`E6b`) internal diffusion,
+    - `10 Hz` polarization (`E1`), topological anisotropy `gamma(n)` (`E2`), principal-axis bounding-box spatial proportions `L1 : L2 : L3` (`E3`), orientation/speed correlation lengths (`E4`), single-bird and group speed distributions across `N = 10..3000` (`E5`), and neighbour retention `Q_M(t)` (`E6c`).
+- `crates/sim-cli`: Multi-threaded (`rayon`) verification and scenario runner.
 
-1. **Stage 1 — Native Rust Reference Harness**: Exact `Ref-ISM` (Cavagna et al. 2015) and `Ref-MarginalSPP` (Cavagna et al. 2022), variance-split `ExactTopoK` LBVH verified 100% against an `O(N^2)` brute-force oracle, and multi-rate kinematic evaluators (`200 Hz` / `40 Hz` / `10 Hz`).
-2. **Stage 2 — Coupled Speed–Heading SDE & Factorial Ablations**: `1/v`-scaled coupled `(v_i, u_i, omega_i)` SDE with mandatory Itô spherical Jacobian drift (`+2 D_v / v_i^* dt`), deterministic/stochastic reduction proofs, and `2x2` factorial attribution (`Exp 2`, `Exp 3`) with zero artificial speed clamps.
-3. **Stage 3 — `wasm32 +simd128` Parity & Instanced WebGPU Viewer**: Standalone WebAssembly module (zero external imports, no `SharedArrayBuffer` / `COOP`+`COEP`), 100% IEEE-754 bitwise Native <-> Wasm trajectory parity, and 12-cell multi-tick WebGPU frame-budget suite with 3D `Mode K` starling geometry and Rayner (2001) intermittent flap/glide/bound gait.
-4. **Stage 4 — Grounded Horizon Camera, Predator Pursuit & Validated Optical Evaluation**: Stationary ground-observer camera with horizon reference, Mills (2018) PPN falcon stoop, `StarEscape` collective escape waves, `Mode K` vs. `Mode A` closed-loop flight actuation, shared-shader headless `wgpu` optical detectors (`C_roll`, `C_pos`, `C_full`, `C_cam`), and `Train / Validation / Final Test` parameter search.
+## Quick Start
 
-## Privacy Hook Setup
+Enable the privacy pre-commit and pre-push hooks before committing:
 
 ```sh
 git config core.hooksPath .githooks
 node scripts/privacy-check.js
+```
+
+Run unit tests and the full Stage 1 verification suite:
+
+```sh
+cargo test --workspace
+cargo run --release -p sim-cli -- verify-stage1
+cargo run --release -p sim-cli -- run scenarios/calm_marginal_spp.toml
 ```
 
 ## License
