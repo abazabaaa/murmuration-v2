@@ -14,6 +14,13 @@ pub struct PositionalInteractionConfig {
     pub k_rep: f32,
     /// Repulsion neighbour count (`1` for StarEscape nearest-neighbour avoidance; `7` for full shell).
     pub n_rep: usize,
+    /// Vertical (`z`) cohesion multiplier (`1.0` = isotropic; `> 1.0` = dorsoventral slab flattening in Exp 3).
+    #[serde(default = "default_vertical_coh_gain")]
+    pub vertical_coh_gain: f32,
+}
+
+fn default_vertical_coh_gain() -> f32 {
+    1.0
 }
 
 impl Default for PositionalInteractionConfig {
@@ -23,6 +30,7 @@ impl Default for PositionalInteractionConfig {
             r0_m: 1.0,
             k_rep: 0.0,
             n_rep: 1,
+            vertical_coh_gain: 1.0,
         }
     }
 }
@@ -343,7 +351,7 @@ impl MarginalSppFlock {
     }
 }
 
-fn compute_positional_force(
+pub fn compute_positional_force(
     i: usize,
     positions: &[Vec3],
     row: &[NeighbourEntry],
@@ -353,6 +361,8 @@ fn compute_positional_force(
         return Vec3::ZERO;
     }
     let xi = positions[i];
+    let gz = pos_cfg.vertical_coh_gain;
+    let aniso = (gz - 1.0).abs() > 1e-6;
     let mut f = Vec3::ZERO;
 
     if pos_cfg.k_coh > 0.0 {
@@ -360,9 +370,18 @@ fn compute_positional_force(
         let mut coh_sum = Vec3::ZERO;
         for e in row {
             let diff = positions[e.id as usize] - xi;
-            let d = libm::sqrtf(e.dist_sq);
-            if d > pos_cfg.r0_m {
-                coh_sum += diff * ((d - pos_cfg.r0_m) / d);
+            let (diff_eff, d_eff) = if aniso {
+                let de = Vec3::new(diff.x, diff.y, diff.z * gz);
+                (de, de.norm())
+            } else {
+                (diff, libm::sqrtf(e.dist_sq))
+            };
+            if d_eff > pos_cfg.r0_m {
+                let mut spring = diff_eff * ((d_eff - pos_cfg.r0_m) / d_eff);
+                if aniso {
+                    spring.z *= gz;
+                }
+                coh_sum += spring;
             }
         }
         f += coh_sum * (pos_cfg.k_coh * inv_m);
@@ -374,14 +393,22 @@ fn compute_positional_force(
         let mut rep_sum = Vec3::ZERO;
         for e in &row[..m_rep] {
             let diff = positions[e.id as usize] - xi;
-            let d = libm::sqrtf(e.dist_sq);
-            if d < pos_cfg.r0_m {
-                let push_dir = if d > 1e-6 {
-                    diff * (-1.0 / d)
+            let (diff_eff, d_eff) = if aniso {
+                let de = Vec3::new(diff.x, diff.y, diff.z * gz);
+                (de, de.norm())
+            } else {
+                (diff, libm::sqrtf(e.dist_sq))
+            };
+            if d_eff < pos_cfg.r0_m {
+                let mut push = if d_eff > 1e-6 {
+                    diff_eff * (-(pos_cfg.r0_m - d_eff) / d_eff)
                 } else {
-                    Vec3::EX
+                    Vec3::EX * (pos_cfg.r0_m - d_eff)
                 };
-                rep_sum += push_dir * (pos_cfg.r0_m - d);
+                if aniso {
+                    push.z *= gz;
+                }
+                rep_sum += push;
             }
         }
         f += rep_sum * (pos_cfg.k_rep * inv_rep);
