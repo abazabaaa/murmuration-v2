@@ -1,0 +1,7 @@
+/target
+/node_modules
+/out
+.DS_Store
+*.profraw
+# Local private words scanned by scripts/privacy-check.js — NEVER commit
+.private-words

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Refuse commits that contain a personal name or a home-directory path.
+exec node "$(git rev-parse --show-toplevel)/scripts/privacy-check.js" --staged

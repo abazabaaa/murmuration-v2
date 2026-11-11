@@ -1,0 +1,8 @@
+#!/bin/sh
+# Refuse pushes whose new blobs, messages or authors contain a personal name or home path.
+root="$(git rev-parse --show-toplevel)"
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  node "$root/scripts/privacy-check.js" --push "$remote_sha" "$local_sha" || status=1
+done
+exit $status
